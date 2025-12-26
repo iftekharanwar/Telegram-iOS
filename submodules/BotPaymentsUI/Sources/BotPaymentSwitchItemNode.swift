@@ -11,7 +11,7 @@ final class BotPaymentSwitchItemNode: BotPaymentItemNode {
     
     private let title: String
     private let titleNode: ASTextNode
-    private let switchNode: SwitchNode
+    private let switchNode: LiquidGlassSwitchNode
     private let buttonNode: HighlightableButtonNode
     
     private var theme: PresentationTheme?
@@ -40,7 +40,7 @@ final class BotPaymentSwitchItemNode: BotPaymentItemNode {
         self.titleNode = ASTextNode()
         self.titleNode.maximumNumberOfLines = 1
         
-        self.switchNode = SwitchNode()
+        self.switchNode = LiquidGlassSwitchNode()
         self.switchNode.setOn(isOn, animated: false)
         
         self.buttonNode = HighlightableButtonNode()

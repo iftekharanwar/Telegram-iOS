@@ -33,32 +33,32 @@ private final class PeerInfoScreenSwitchItemNode: PeerInfoScreenItemNode {
     private let maskNode: ASImageNode
     private let iconNode: ASImageNode
     private let textNode: ImmediateTextNode
-    private let switchNode: SwitchNode
+    private let switchNode: LiquidGlassSwitchNode
     private var lockedIconNode: ASImageNode?
     private let bottomSeparatorNode: ASDisplayNode
     private var lockedButtonNode: HighlightableButtonNode?
     private let activateArea: AccessibilityAreaNode
-    
+
     private var item: PeerInfoScreenSwitchItem?
-    
+
     private var theme: PresentationTheme?
-    
+
     override init() {
         var bringToFrontForHighlightImpl: (() -> Void)?
         self.selectionNode = PeerInfoScreenSelectableBackgroundNode(bringToFrontForHighlight: { bringToFrontForHighlightImpl?() })
-        
+
         self.maskNode = ASImageNode()
         self.maskNode.isUserInteractionEnabled = false
-        
+
         self.iconNode = ASImageNode()
         self.iconNode.isLayerBacked = true
         self.iconNode.displaysAsynchronously = false
-        
+
         self.textNode = ImmediateTextNode()
         self.textNode.displaysAsynchronously = false
         self.textNode.isUserInteractionEnabled = false
-        
-        self.switchNode = SwitchNode()
+
+        self.switchNode = LiquidGlassSwitchNode()
         
         self.bottomSeparatorNode = ASDisplayNode()
         self.bottomSeparatorNode.isLayerBacked = true

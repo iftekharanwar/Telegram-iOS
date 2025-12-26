@@ -68,6 +68,7 @@ public final class ListSwitchItemComponent: Component {
                 transition: transition,
                 component: AnyComponent(SwitchComponent(
                     value: component.value,
+                    useLiquidGlass: true,
                     valueUpdated: { [weak self] value in
                         guard let self else {
                             return

@@ -121,6 +121,23 @@ extension SwitchNode: ItemListSwitchNodeImpl {
 extension IconSwitchNode: ItemListSwitchNodeImpl {
 }
 
+extension LiquidGlassSwitchNode: ItemListSwitchNodeImpl {
+    var positiveContentColor: UIColor {
+        get {
+            return .white
+        } set(value) {
+
+        }
+    }
+    var negativeContentColor: UIColor {
+        get {
+            return .white
+        } set(value) {
+
+        }
+    }
+}
+
 public class ItemListReactionItemNode: ListViewItemNode, ItemListItemNode {
     private let backgroundNode: ASDisplayNode
     private let topStripeNode: ASDisplayNode
@@ -159,7 +176,7 @@ public class ItemListReactionItemNode: ListViewItemNode, ItemListItemNode {
         self.titleNode = TextNode()
         self.titleNode.isUserInteractionEnabled = false
         
-        self.switchNode = SwitchNode()
+        self.switchNode = LiquidGlassSwitchNode()
         
         self.highlightedBackgroundNode = ASDisplayNode()
         self.highlightedBackgroundNode.isLayerBacked = true

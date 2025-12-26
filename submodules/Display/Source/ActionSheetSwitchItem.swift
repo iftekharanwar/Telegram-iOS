@@ -37,24 +37,24 @@ public class ActionSheetSwitchNode: ActionSheetItemNode {
     
     private let button: HighlightTrackingButton
     private let label: ImmediateTextNode
-    private let switchNode: SwitchNode
-    
+    private let switchNode: LiquidGlassSwitchNode
+
     private let accessibilityArea: AccessibilityAreaNode
-    
+
     override public init(theme: ActionSheetControllerTheme) {
         self.theme = theme
-        
+
         self.button = HighlightTrackingButton()
         self.button.isAccessibilityElement = false
-        
+
         self.label = ImmediateTextNode()
         self.label.isUserInteractionEnabled = false
         self.label.maximumNumberOfLines = 1
         self.label.displaysAsynchronously = false
         self.label.truncationType = .end
         self.label.isAccessibilityElement = false
-        
-        self.switchNode = SwitchNode()
+
+        self.switchNode = LiquidGlassSwitchNode()
         self.switchNode.frameColor = theme.switchFrameColor
         self.switchNode.contentColor = theme.switchContentColor
         self.switchNode.handleColor = theme.switchHandleColor

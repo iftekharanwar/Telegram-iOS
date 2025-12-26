@@ -3,6 +3,328 @@ import UIKit
 import Display
 import ComponentFlow
 import GlassBackgroundComponent
+import MetalKit
+
+// MARK: - Lens Metal Implementation
+
+private struct LensShaderSource {
+    static let code = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        struct VertexOut {
+            float4 position [[position]];
+            float2 texCoord;
+        };
+
+        struct LensUniforms {
+            float2 size;
+            float2 offset;
+            float2 backgroundSize;
+            float cornerRadius;
+            float refractionStrength;
+            float magnificationStrength;
+            float liftAmount;
+            float isDarkMode;
+        };
+
+        vertex VertexOut lensVertex(uint vertexID [[vertex_id]]) {
+            float2 positions[4] = {
+                float2(-1.0, -1.0), float2( 1.0, -1.0),
+                float2(-1.0,  1.0), float2( 1.0,  1.0)
+            };
+            float2 texCoords[4] = {
+                float2(0.0, 1.0), float2(1.0, 1.0),
+                float2(0.0, 0.0), float2(1.0, 0.0)
+            };
+            VertexOut out;
+            out.position = float4(positions[vertexID], 0.0, 1.0);
+            out.texCoord = texCoords[vertexID];
+            return out;
+        }
+
+        float sdRoundedBox(float2 p, float2 b, float r) {
+            float2 q = abs(p) - b + r;
+            return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+        }
+
+        fragment float4 lensFragment(
+            VertexOut in [[stage_in]],
+            texture2d<float, access::sample> backgroundTexture [[texture(0)]],
+            constant LensUniforms &uniforms [[buffer(0)]]
+        ) {
+            constexpr sampler texSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+
+            float2 uv = in.texCoord;
+            float2 pixelPos = uv * uniforms.size;
+            float2 center = uniforms.size * 0.5;
+            float2 fromCenter = pixelPos - center;
+
+            float halfWidth = uniforms.size.x * 0.5;
+            float halfHeight = uniforms.size.y * 0.5;
+            float sdf = sdRoundedBox(fromCenter, float2(halfWidth, halfHeight), uniforms.cornerRadius);
+
+            if (sdf > 0.0) {
+                discard_fragment();
+            }
+
+            // Magnification
+            float distFromCenter = length(fromCenter);
+            float maxDist = min(halfWidth, halfHeight);
+            float centerFactor = 1.0 - smoothstep(0.0, maxDist, distFromCenter);
+            centerFactor = centerFactor * centerFactor;
+            float magnification = 1.0 + (centerFactor * uniforms.magnificationStrength * uniforms.liftAmount);
+            float2 magnifiedFromCenter = fromCenter / magnification;
+            float2 magnifiedPixelPos = center + magnifiedFromCenter;
+
+            // Refraction
+            float distFromEdge = -sdf;
+            float edgeBand = min(uniforms.size.x, uniforms.size.y) * 0.3;
+            float edgeFactor = 1.0 - smoothstep(0.0, edgeBand, distFromEdge);
+            edgeFactor = edgeFactor * edgeFactor * edgeFactor * 2.0;
+
+            float2 nearestCenterPoint;
+            float insetX = min(uniforms.cornerRadius, halfWidth);
+            float insetY = min(uniforms.cornerRadius, halfHeight);
+
+            if (uniforms.size.x >= uniforms.size.y) {
+                float clampedX = clamp(magnifiedPixelPos.x, insetX, uniforms.size.x - insetX);
+                nearestCenterPoint = float2(clampedX, center.y);
+            } else {
+                float clampedY = clamp(magnifiedPixelPos.y, insetY, uniforms.size.y - insetY);
+                nearestCenterPoint = float2(center.x, clampedY);
+            }
+
+            float2 toCenter = nearestCenterPoint - magnifiedPixelPos;
+            float distToCenter = length(toCenter);
+            if (distToCenter > 0.001) {
+                toCenter = toCenter / distToCenter;
+            } else {
+                toCenter = float2(0.0);
+            }
+
+            // Chromatic aberration - subtle for clarity
+            float displacement = edgeFactor * uniforms.refractionStrength * edgeBand;
+            float chromeStrength = edgeFactor * 3.0;  // Subtle RGB separation
+
+            float2 redOffset = toCenter * (displacement + chromeStrength);
+            float2 greenOffset = toCenter * displacement;
+            float2 blueOffset = toCenter * (displacement - chromeStrength);
+
+            float2 redUV = (uniforms.offset + magnifiedPixelPos + redOffset) / uniforms.backgroundSize;
+            float2 greenUV = (uniforms.offset + magnifiedPixelPos + greenOffset) / uniforms.backgroundSize;
+            float2 blueUV = (uniforms.offset + magnifiedPixelPos + blueOffset) / uniforms.backgroundSize;
+
+            redUV = clamp(redUV, float2(0.001), float2(0.999));
+            greenUV = clamp(greenUV, float2(0.001), float2(0.999));
+            blueUV = clamp(blueUV, float2(0.001), float2(0.999));
+
+            float r = backgroundTexture.sample(texSampler, redUV).r;
+            float g = backgroundTexture.sample(texSampler, greenUV).g;
+            float b = backgroundTexture.sample(texSampler, blueUV).b;
+            float3 color = float3(r, g, b);
+
+            float3 tint = uniforms.isDarkMode > 0.5
+                ? float3(0.3, 0.3, 0.3)
+                : float3(0.85, 0.85, 0.85);
+            color = mix(color, tint, 0.02);
+
+            float aa = 1.0 - smoothstep(-1.0, 0.5, sdf);
+            return float4(color.rgb, aa);
+        }
+        """
+}
+
+private final class LensMetalView: UIView {
+    private weak var sourceView: UIView?
+    private var metalView: MTKView!
+    private var device: MTLDevice!
+    private var commandQueue: MTLCommandQueue!
+    private var pipelineState: MTLRenderPipelineState?
+    private var displayLink: CADisplayLink?
+    private var backgroundTexture: MTLTexture?
+    private let ciContext: CIContext
+
+    private var uniforms = LensUniforms()
+
+    struct LensUniforms {
+        var size: SIMD2<Float> = .zero
+        var offset: SIMD2<Float> = .zero
+        var backgroundSize: SIMD2<Float> = .zero
+        var cornerRadius: Float = 0
+        var refractionStrength: Float = 0.6  // Balanced for readability
+        var magnificationStrength: Float = 0.12  // Subtle magnification - maintains clarity
+        var liftAmount: Float = 0
+        var isDarkMode: Float = 0
+    }
+
+    var cornerRadius: CGFloat = 32.0
+    var liftAmount: CGFloat = 0.0
+    var isDarkMode: Bool = false
+
+    private var lastCaptureTime: CFTimeInterval = 0
+    private let minCaptureInterval: CFTimeInterval = 1.0 / 20.0
+
+    init(sourceView: UIView) {
+        self.sourceView = sourceView
+
+        guard let device = MTLCreateSystemDefaultDevice() else {
+            fatalError("Metal not available")
+        }
+        self.device = device
+        self.commandQueue = device.makeCommandQueue()!
+        self.ciContext = CIContext(mtlDevice: device, options: [.workingColorSpace: NSNull()])
+
+        super.init(frame: .zero)
+
+        setupMetal()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        displayLink?.invalidate()
+    }
+
+    private func setupMetal() {
+        let mtkView = MTKView(frame: bounds, device: device)
+        mtkView.backgroundColor = .clear
+        mtkView.isOpaque = false
+        mtkView.framebufferOnly = false
+        mtkView.isPaused = false
+        mtkView.preferredFramesPerSecond = 60
+        mtkView.delegate = self
+        self.metalView = mtkView
+        addSubview(mtkView)
+
+        guard let library = try? device.makeLibrary(source: LensShaderSource.code, options: nil),
+              let vertexFunc = library.makeFunction(name: "lensVertex"),
+              let fragmentFunc = library.makeFunction(name: "lensFragment") else {
+            return
+        }
+
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunc
+        descriptor.fragmentFunction = fragmentFunc
+        descriptor.colorAttachments[0].pixelFormat = mtkView.colorPixelFormat
+        descriptor.colorAttachments[0].isBlendingEnabled = true
+        descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+        descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+        descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+        descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        pipelineState = try? device.makeRenderPipelineState(descriptor: descriptor)
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            startDisplayLink()
+        } else {
+            stopDisplayLink()
+        }
+    }
+
+    private func startDisplayLink() {
+        guard displayLink == nil else { return }
+        let link = CADisplayLink(target: self, selector: #selector(updateFrame))
+        link.preferredFramesPerSecond = 20
+        link.add(to: .main, forMode: .common)
+        displayLink = link
+    }
+
+    private func stopDisplayLink() {
+        displayLink?.invalidate()
+        displayLink = nil
+    }
+
+    @objc private func updateFrame() {
+        let currentTime = CACurrentMediaTime()
+        guard currentTime - lastCaptureTime >= minCaptureInterval else { return }
+        lastCaptureTime = currentTime
+        captureAndRender()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        metalView?.frame = bounds
+    }
+
+    private func captureAndRender() {
+        guard let sourceView = sourceView else { return }
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        let frameInSource = convert(bounds, to: sourceView)
+        let padding: CGFloat = 10.0
+        let captureRect = frameInSource.insetBy(dx: -padding, dy: -padding).intersection(sourceView.bounds)
+
+        guard captureRect.width > 0, captureRect.height > 0 else { return }
+
+        let scale: CGFloat = 1.0
+        UIGraphicsBeginImageContextWithOptions(captureRect.size, true, scale)
+        defer { UIGraphicsEndImageContext() }
+
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        ctx.translateBy(x: -captureRect.origin.x, y: -captureRect.origin.y)
+
+        let savedAlpha = alpha
+        alpha = 0
+        sourceView.layer.render(in: ctx)
+        alpha = savedAlpha
+
+        guard let snapshot = UIGraphicsGetImageFromCurrentImageContext(),
+              let cgImage = snapshot.cgImage else { return }
+
+        // NO BLUR - keep background sharp for clear refraction effect
+        let textureLoader = MTKTextureLoader(device: device)
+        backgroundTexture = try? textureLoader.newTexture(cgImage: cgImage, options: [.SRGB: false])
+
+        let screenScale = UIScreen.main.scale
+        let offset = CGPoint(x: frameInSource.origin.x - captureRect.origin.x, y: frameInSource.origin.y - captureRect.origin.y)
+
+        uniforms.size = SIMD2<Float>(Float(bounds.width * screenScale), Float(bounds.height * screenScale))
+        uniforms.offset = SIMD2<Float>(Float(offset.x * screenScale), Float(offset.y * screenScale))
+        uniforms.backgroundSize = SIMD2<Float>(Float(captureRect.width * scale * screenScale), Float(captureRect.height * scale * screenScale))
+        uniforms.cornerRadius = Float(cornerRadius * screenScale)
+        uniforms.liftAmount = Float(liftAmount)
+        uniforms.isDarkMode = isDarkMode ? 1.0 : 0.0
+
+        metalView.setNeedsDisplay()
+    }
+
+    func setSourceView(_ view: UIView) {
+        self.sourceView = view
+    }
+}
+
+extension LensMetalView: MTKViewDelegate {
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+    func draw(in view: MTKView) {
+        guard let pipelineState = pipelineState,
+              let drawable = view.currentDrawable,
+              let descriptor = view.currentRenderPassDescriptor,
+              let backgroundTexture = backgroundTexture else { return }
+
+        descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        descriptor.colorAttachments[0].loadAction = .clear
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return }
+
+        encoder.setRenderPipelineState(pipelineState)
+        encoder.setFragmentTexture(backgroundTexture, index: 0)
+        var uniformsCopy = uniforms
+        encoder.setFragmentBytes(&uniformsCopy, length: MemoryLayout<LensUniforms>.stride, index: 0)
+        encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        encoder.endEncoding()
+
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+}
 
 private final class RestingBackgroundView: UIVisualEffectView {
     var isDark: Bool?
@@ -89,10 +411,11 @@ public final class LiquidLensView: UIView {
     private let backgroundContainer: GlassBackgroundContainerView
     private let backgroundView: GlassBackgroundView
     private var lensView: UIView?
+    private var lensMetalView: LensMetalView?
     private let liftedContainerView: UIView
     public let contentView: UIView
     private let restingBackgroundView: RestingBackgroundView
-    
+
     private var legacySelectionView: GlassBackgroundView.ContentImageView?
     private var legacyContentMaskView: UIView?
     private var legacyContentMaskBlobView: UIImageView?
@@ -192,29 +515,44 @@ public final class LiquidLensView: UIView {
             
             lensView.setValue(UIColor(white: 0.0, alpha: 0.1), forKey: "restingBackgroundColor")
         } else {
+            // Custom Metal lens for iOS 13-25
+            var sourceView: UIView = self
+            if let window = self.window {
+                sourceView = window
+            } else if let superview = self.superview {
+                sourceView = superview.window ?? superview
+            }
+
+            let metalLens = LensMetalView(sourceView: sourceView)
+            self.lensMetalView = metalLens
+            metalLens.layer.zPosition = 5.0
+            metalLens.alpha = 0.0  // Hidden initially, shown when lifted
+            self.containerView.addSubview(metalLens)
+
+            // Keep legacy selection view for non-lifted state
             let legacySelectionView = GlassBackgroundView.ContentImageView()
             self.legacySelectionView = legacySelectionView
             self.backgroundView.contentView.insertSubview(legacySelectionView, at: 0)
-            
+
             let legacyContentMaskView = UIView()
             legacyContentMaskView.backgroundColor = .white
             self.legacyContentMaskView = legacyContentMaskView
             self.contentView.mask = legacyContentMaskView
-            
+
             if let filter = CALayer.luminanceToAlpha() {
                 legacyContentMaskView.layer.filters = [filter]
             }
-            
+
             let legacyContentMaskBlobView = UIImageView()
             self.legacyContentMaskBlobView = legacyContentMaskBlobView
             legacyContentMaskView.addSubview(legacyContentMaskBlobView)
-            
+
             self.containerView.addSubview(self.contentView)
-            
+
             let legacyLiftedContentBlobMaskView = UIImageView()
             self.legacyLiftedContentBlobMaskView = legacyLiftedContentBlobMaskView
             self.liftedContainerView.mask = legacyLiftedContentBlobMaskView
-            
+
             self.containerView.addSubview(self.liftedContainerView)
         }
     }
@@ -336,10 +674,29 @@ public final class LiquidLensView: UIView {
         if let legacyContentMaskView = self.legacyContentMaskView {
             transition.setFrame(view: legacyContentMaskView, frame: CGRect(origin: CGPoint(), size: params.size))
         }
+        if let metalLens = self.lensMetalView {
+            let lensFrame = baseLensFrame.insetBy(dx: 4.0, dy: 4.0)
+            let liftedInset: CGFloat = params.isLifted ? 4.0 : 0.0
+            let effectiveLensFrame = lensFrame.insetBy(dx: -liftedInset, dy: -liftedInset)
+
+            transition.setFrame(view: metalLens, frame: effectiveLensFrame)
+            metalLens.cornerRadius = effectiveLensFrame.height * 0.5
+            metalLens.isDarkMode = params.isDark
+            metalLens.liftAmount = params.isLifted ? 1.0 : 0.0
+
+            // Only show when lifted
+            transition.setAlpha(view: metalLens, alpha: params.isLifted ? 1.0 : 0.0)
+
+            // Update source view if window is now available
+            if let window = self.window {
+                metalLens.setSourceView(window)
+            }
+        }
+
         if let legacyContentMaskBlobView = self.legacyContentMaskBlobView, let legacyLiftedContentBlobMaskView = self.legacyLiftedContentBlobMaskView, let legacySelectionView = self.legacySelectionView {
             let lensFrame = baseLensFrame.insetBy(dx: 4.0, dy: 4.0)
             let effectiveLensFrame = lensFrame.insetBy(dx: params.isLifted ? -2.0 : 0.0, dy: params.isLifted ? -2.0 : 0.0)
-            
+
             if legacyContentMaskBlobView.image?.size.height != lensFrame.height {
                 legacyContentMaskBlobView.image = generateStretchableFilledCircleImage(diameter: lensFrame.height, color: .black)
                 legacyLiftedContentBlobMaskView.image = legacyContentMaskBlobView.image
@@ -347,7 +704,7 @@ public final class LiquidLensView: UIView {
             }
             transition.setFrame(view: legacyContentMaskBlobView, frame: effectiveLensFrame)
             transition.setFrame(view: legacyLiftedContentBlobMaskView, frame: effectiveLensFrame)
-            
+
             legacySelectionView.tintColor = UIColor(white: params.isDark ? 1.0 : 0.0, alpha: params.isDark ? 0.1 : 0.075)
             transition.setFrame(view: legacySelectionView, frame: effectiveLensFrame)
         }

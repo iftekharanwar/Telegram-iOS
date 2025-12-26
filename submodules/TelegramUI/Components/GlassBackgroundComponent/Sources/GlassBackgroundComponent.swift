@@ -6,16 +6,450 @@ import ComponentDisplayAdapters
 import UIKitRuntimeUtils
 import CoreImage
 import AppBundle
+import MetalKit
+
+// MARK: - Advanced Material Rendering System
+
+private struct RefractionShaderDescriptor {
+    static let source = """
+        #include <metal_stdlib>
+        using namespace metal;
+
+        struct RasterizationData {
+            float4 clipSpacePosition [[position]];
+            float2 textureCoordinate;
+        };
+
+        struct MaterialParams {
+            float2 dimensions;
+            float2 contentOffset;
+            float2 sourceSize;
+            float radiusValue;
+            float aberrationIntensity;
+            float appearanceMode;
+        };
+
+        vertex RasterizationData vertexTransform(uint vertexID [[vertex_id]]) {
+            constexpr float2 positions[] = {
+                float2(-1.0, -1.0), float2(1.0, -1.0),
+                float2(-1.0, 1.0), float2(1.0, 1.0)
+            };
+            constexpr float2 coords[] = {
+                float2(0.0, 1.0), float2(1.0, 1.0),
+                float2(0.0, 0.0), float2(1.0, 0.0)
+            };
+            return RasterizationData{float4(positions[vertexID], 0.0, 1.0), coords[vertexID]};
+        }
+
+        float signedDistanceRoundRect(float2 samplePoint, float2 extent, float radius) {
+            float2 delta = abs(samplePoint) - extent + radius;
+            return min(max(delta.x, delta.y), 0.0) + length(max(delta, 0.0)) - radius;
+        }
+
+        fragment float4 applyMaterialEffect(
+            RasterizationData in [[stage_in]],
+            texture2d<float, access::sample> sourceTexture [[texture(0)]],
+            constant MaterialParams &params [[buffer(0)]]
+        ) {
+            constexpr sampler linearSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+
+            float2 normalizedCoord = in.textureCoordinate;
+            float2 pixelCoord = normalizedCoord * params.dimensions;
+            float2 centerPoint = params.dimensions * 0.5;
+            float2 centerOffset = pixelCoord - centerPoint;
+
+            float distanceField = signedDistanceRoundRect(
+                centerOffset,
+                float2(params.dimensions.x * 0.5, params.dimensions.y * 0.5),
+                params.radiusValue
+            );
+
+            if (distanceField > 0.0) discard_fragment();
+
+            float edgeProximity = -distanceField;
+            float influenceRadius = min(params.dimensions.x, params.dimensions.y) * 0.3;
+            float edgeInfluence = 1.0 - smoothstep(0.0, influenceRadius, edgeProximity);
+            edgeInfluence = pow(edgeInfluence, 3.0) * 2.0;
+
+            float2 centerReference;
+            float insetH = min(params.radiusValue, params.dimensions.x * 0.5);
+            float insetV = min(params.radiusValue, params.dimensions.y * 0.5);
+
+            if (params.dimensions.x >= params.dimensions.y) {
+                centerReference = float2(clamp(pixelCoord.x, insetH, params.dimensions.x - insetH), centerPoint.y);
+            } else {
+                centerReference = float2(centerPoint.x, clamp(pixelCoord.y, insetV, params.dimensions.y - insetV));
+            }
+
+            float2 directionToCenter = centerReference - pixelCoord;
+            float distanceToCenter = length(directionToCenter);
+            directionToCenter = distanceToCenter > 0.001 ? directionToCenter / distanceToCenter : float2(0.0);
+
+            float displacementMagnitude = edgeInfluence * params.aberrationIntensity * influenceRadius;
+            float chromaticShift = edgeInfluence * 3.0;  // Subtle RGB separation for clarity
+
+            float2 redShift = directionToCenter * (displacementMagnitude + chromaticShift);
+            float2 greenShift = directionToCenter * displacementMagnitude;
+            float2 blueShift = directionToCenter * (displacementMagnitude - chromaticShift);
+
+            float2 redCoord = (params.contentOffset + pixelCoord + redShift) / params.sourceSize;
+            float2 greenCoord = (params.contentOffset + pixelCoord + greenShift) / params.sourceSize;
+            float2 blueCoord = (params.contentOffset + pixelCoord + blueShift) / params.sourceSize;
+
+            redCoord = clamp(redCoord, float2(0.001), float2(0.999));
+            greenCoord = clamp(greenCoord, float2(0.001), float2(0.999));
+            blueCoord = clamp(blueCoord, float2(0.001), float2(0.999));
+
+            float3 sampledColor = float3(
+                sourceTexture.sample(linearSampler, redCoord).r,
+                sourceTexture.sample(linearSampler, greenCoord).g,
+                sourceTexture.sample(linearSampler, blueCoord).b
+            );
+
+            float3 tintValue = params.appearanceMode > 0.5 ? float3(0.3) : float3(0.85);
+            sampledColor = mix(sampledColor, tintValue, 0.02);
+
+            float edgeAntialias = 1.0 - smoothstep(-1.0, 0.5, distanceField);
+
+            return float4(sampledColor, edgeAntialias);
+        }
+        """
+}
+
+private final class AdvancedMaterialView: UIView {
+    private final class RenderingContext {
+        let device: MTLDevice
+        let commandQueue: MTLCommandQueue
+        let pipelineState: MTLRenderPipelineState
+        var activeTexture: MTLTexture?
+
+        struct Parameters {
+            var dimensions: SIMD2<Float> = .zero
+            var contentOffset: SIMD2<Float> = .zero
+            var sourceSize: SIMD2<Float> = .zero
+            var radiusValue: Float = 0
+            var aberrationIntensity: Float = 0
+            var appearanceMode: Float = 0
+        }
+
+        var parameters = Parameters()
+
+        init?(device: MTLDevice, pixelFormat: MTLPixelFormat) {
+            self.device = device
+            guard let queue = device.makeCommandQueue() else {
+                print("⚠️ RenderingContext: Failed to create command queue")
+                return nil
+            }
+            self.commandQueue = queue
+
+            do {
+                let library = try device.makeLibrary(source: RefractionShaderDescriptor.source, options: nil)
+                guard let vertexFunc = library.makeFunction(name: "vertexTransform"),
+                      let fragmentFunc = library.makeFunction(name: "applyMaterialEffect") else {
+                    print("⚠️ RenderingContext: Failed to find shader functions")
+                    return nil
+                }
+
+                let pipelineDescriptor = MTLRenderPipelineDescriptor()
+                pipelineDescriptor.vertexFunction = vertexFunc
+                pipelineDescriptor.fragmentFunction = fragmentFunc
+                pipelineDescriptor.colorAttachments[0].pixelFormat = pixelFormat
+                pipelineDescriptor.colorAttachments[0].isBlendingEnabled = true
+                pipelineDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+                pipelineDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+                pipelineDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+                pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+                let pipeline = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
+                self.pipelineState = pipeline
+                print("✅ RenderingContext: Pipeline created successfully")
+            } catch {
+                print("⚠️ RenderingContext: Shader compilation failed: \(error)")
+                return nil
+            }
+        }
+
+        func encode(into encoder: MTLRenderCommandEncoder) {
+            guard let texture = activeTexture else { return }
+            encoder.setRenderPipelineState(pipelineState)
+            encoder.setFragmentTexture(texture, index: 0)
+            var params = parameters
+            encoder.setFragmentBytes(&params, length: MemoryLayout<Parameters>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+        }
+    }
+
+    private final class BackgroundCaptureEngine {
+        private let imageContext: CIContext
+        private weak var targetView: UIView?
+        private var lastUpdateTime: CFTimeInterval = 0
+
+        init(targetView: UIView) {
+            self.targetView = targetView
+            self.imageContext = CIContext(options: [.useSoftwareRenderer: false])
+        }
+
+        func captureBackground(for bounds: CGRect, scale: CGFloat, padding: CGFloat, hiddenView: UIView?) -> (image: UIImage, offset: CGPoint)? {
+            guard let target = targetView else { return nil }
+            guard bounds.width > 0, bounds.height > 0 else { return nil }
+
+            let frameInTarget = hiddenView?.convert(bounds, to: target) ?? bounds
+            let captureRegion = frameInTarget.insetBy(dx: -padding, dy: -padding).intersection(target.bounds)
+
+            guard captureRegion.width > 0, captureRegion.height > 0 else { return nil }
+
+            UIGraphicsBeginImageContextWithOptions(captureRegion.size, false, scale)
+            defer { UIGraphicsEndImageContext() }
+
+            guard let context = UIGraphicsGetCurrentContext() else { return nil }
+            context.translateBy(x: -captureRegion.origin.x, y: -captureRegion.origin.y)
+
+            var parentGlassView: UIView? = hiddenView?.superview
+            while let parent = parentGlassView {
+                if parent is GlassBackgroundView {
+                    break
+                }
+                parentGlassView = parent.superview
+            }
+
+            let savedHiddenAlpha = hiddenView?.alpha ?? 1.0
+            let savedParentAlpha = parentGlassView?.alpha ?? 1.0
+
+            hiddenView?.alpha = 0
+            parentGlassView?.alpha = 0
+
+            target.layer.render(in: context)
+
+            hiddenView?.alpha = savedHiddenAlpha
+            parentGlassView?.alpha = savedParentAlpha
+
+            guard let snapshot = UIGraphicsGetImageFromCurrentImageContext(),
+                  let cgImage = snapshot.cgImage else { return nil }
+
+            let ciImage = CIImage(cgImage: cgImage)
+            let blurFilter = CIFilter(name: "CIGaussianBlur")
+            blurFilter?.setValue(ciImage, forKey: kCIInputImageKey)
+            blurFilter?.setValue(2.0, forKey: kCIInputRadiusKey)
+
+            if let blurredCIImage = blurFilter?.outputImage {
+                let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+                if let blurredCGImage = ciContext.createCGImage(blurredCIImage, from: blurredCIImage.extent) {
+                    let finalImage = UIImage(cgImage: blurredCGImage, scale: scale, orientation: .up)
+                    let offset = CGPoint(
+                        x: frameInTarget.origin.x - captureRegion.origin.x,
+                        y: frameInTarget.origin.y - captureRegion.origin.y
+                    )
+                    return (finalImage, offset)
+                }
+            }
+
+            // Fallback to non-blurred if blur fails
+            let finalImage = UIImage(cgImage: cgImage, scale: scale, orientation: .up)
+            let offset = CGPoint(
+                x: frameInTarget.origin.x - captureRegion.origin.x,
+                y: frameInTarget.origin.y - captureRegion.origin.y
+            )
+            return (finalImage, offset)
+        }
+    }
+
+    fileprivate weak var contentSourceView: UIView?
+    private var metalDisplayView: MTKView!
+    private var renderContext: RenderingContext?
+    private var updateTimer: CADisplayLink?
+    private let illuminationLayer: CAGradientLayer
+    private var captureEngine: BackgroundCaptureEngine?
+
+    private var lastRenderTimestamp: CFTimeInterval = 0
+    private let minimumUpdateInterval: CFTimeInterval = 1.0 / 60.0
+
+    var shapeRadius: CGFloat = 32 {
+        didSet {
+            guard shapeRadius != oldValue else { return }
+            scheduleUpdate()
+        }
+    }
+
+    var distortionStrength: Float = 0.6  // Balanced - visible effect but maintains readability
+    var isDarkAppearance: Bool = false {
+        didSet {
+            guard isDarkAppearance != oldValue else { return }
+            scheduleUpdate()
+        }
+    }
+
+    init(contentSource: UIView) {
+        self.contentSourceView = contentSource
+        self.illuminationLayer = CAGradientLayer()
+        super.init(frame: .zero)
+        configureComponents()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    deinit {
+        updateTimer?.invalidate()
+    }
+
+    func updateContentSource(_ view: UIView) {
+        contentSourceView = view
+        captureEngine = BackgroundCaptureEngine(targetView: view)
+        scheduleUpdate()
+    }
+
+    private func configureComponents() {
+        guard let metalDevice = MTLCreateSystemDefaultDevice() else {
+            print("⚠️ AdvancedMaterialView: Metal device not available")
+            return
+        }
+
+        illuminationLayer.colors = [
+            UIColor(white: 1.0, alpha: 0.03).cgColor,
+            UIColor(white: 1.0, alpha: 0.0).cgColor
+        ]
+        illuminationLayer.locations = [0.0, 1.0]
+        layer.addSublayer(illuminationLayer)
+
+        metalDisplayView = MTKView()
+        metalDisplayView.device = metalDevice
+        metalDisplayView.backgroundColor = .clear
+        metalDisplayView.isOpaque = false
+        metalDisplayView.framebufferOnly = false
+        metalDisplayView.isPaused = false
+        metalDisplayView.enableSetNeedsDisplay = false
+        metalDisplayView.preferredFramesPerSecond = 60
+        addSubview(metalDisplayView)
+
+        guard let context = RenderingContext(device: metalDevice, pixelFormat: metalDisplayView.colorPixelFormat) else {
+            print("⚠️ AdvancedMaterialView: Failed to create RenderingContext")
+            return
+        }
+        renderContext = context
+        metalDisplayView.delegate = self
+
+        if let source = contentSourceView {
+            captureEngine = BackgroundCaptureEngine(targetView: source)
+        }
+
+        print("✅ AdvancedMaterialView: Configured successfully")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window != nil {
+            activateUpdateTimer()
+            performBackgroundCapture()
+        } else {
+            deactivateUpdateTimer()
+        }
+    }
+
+    private func activateUpdateTimer() {
+        guard updateTimer == nil else { return }
+        let timer = CADisplayLink(target: self, selector: #selector(timerTriggered))
+        timer.preferredFramesPerSecond = 20
+        timer.add(to: .main, forMode: .common)
+        updateTimer = timer
+    }
+
+    private func deactivateUpdateTimer() {
+        updateTimer?.invalidate()
+        updateTimer = nil
+    }
+
+    @objc private func timerTriggered() {
+        let timestamp = CACurrentMediaTime()
+        guard timestamp - lastRenderTimestamp >= minimumUpdateInterval else { return }
+        lastRenderTimestamp = timestamp
+        performBackgroundCapture()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        metalDisplayView?.frame = bounds
+        illuminationLayer.frame = bounds
+        illuminationLayer.cornerRadius = shapeRadius
+        scheduleUpdate()
+    }
+
+    private func scheduleUpdate() {
+        // Trigger capture on next cycle
+    }
+
+    private func performBackgroundCapture() {
+        guard let engine = captureEngine, let context = renderContext else { return }
+        guard bounds.width > 0, bounds.height > 0 else { return }
+
+        guard let result = engine.captureBackground(
+            for: bounds,
+            scale: 1.0,
+            padding: 10.0,
+            hiddenView: self
+        ) else { return }
+
+        let screenScale = UIScreen.main.scale
+        context.parameters.dimensions = SIMD2<Float>(
+            Float(bounds.width * screenScale),
+            Float(bounds.height * screenScale)
+        )
+        context.parameters.contentOffset = SIMD2<Float>(
+            Float(result.offset.x * screenScale),
+            Float(result.offset.y * screenScale)
+        )
+        context.parameters.sourceSize = SIMD2<Float>(
+            Float(result.image.size.width * screenScale),
+            Float(result.image.size.height * screenScale)
+        )
+        context.parameters.radiusValue = Float(shapeRadius * screenScale)
+        context.parameters.aberrationIntensity = distortionStrength
+        context.parameters.appearanceMode = isDarkAppearance ? 1.0 : 0.0
+
+        if let cgImage = result.image.cgImage {
+            let loader = MTKTextureLoader(device: context.device)
+            context.activeTexture = try? loader.newTexture(cgImage: cgImage, options: [.SRGB: false])
+        }
+
+        metalDisplayView.setNeedsDisplay()
+    }
+}
+
+extension AdvancedMaterialView: MTKViewDelegate {
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        // Size changes handled in layoutSubviews
+    }
+
+    func draw(in view: MTKView) {
+        guard let context = renderContext,
+              let drawable = view.currentDrawable,
+              let passDescriptor = view.currentRenderPassDescriptor else { return }
+
+        passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+        passDescriptor.colorAttachments[0].loadAction = .clear
+
+        guard let commandBuffer = context.commandQueue.makeCommandBuffer(),
+              let renderEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else { return }
+
+        context.encode(into: renderEncoder)
+        renderEncoder.endEncoding()
+
+        commandBuffer.present(drawable)
+        commandBuffer.commit()
+    }
+}
+
+// MARK: - Content Container
 
 private final class ContentContainer: UIView {
     private let maskContentView: UIView
-    
+
     init(maskContentView: UIView) {
         self.maskContentView = maskContentView
-        
+
         super.init(frame: CGRect())
     }
-    
+
     required public init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
@@ -302,18 +736,20 @@ public class GlassBackgroundView: UIView {
     }
     
     private let backgroundNode: NavigationBackgroundNode?
-    
+    private var materialView: AdvancedMaterialView?
+
     private let nativeView: UIVisualEffectView?
     private let nativeViewClippingContext: ClippingShapeContext?
     private let nativeParamsView: EffectSettingsContainerView?
-    
+
     private let foregroundView: UIImageView?
     private let shadowView: UIImageView?
-    
+
     private let maskContainerView: UIView
     public let maskContentView: UIView
     private let contentContainer: ContentContainer
-    
+
+    private var whiteBacklightView: UIView?
     private var innerBackgroundView: UIView?
     
     public var contentView: UIView {
@@ -326,33 +762,44 @@ public class GlassBackgroundView: UIView {
     
     public private(set) var params: Params?
         
-    public static var useCustomGlassImpl: Bool = false
-    
+    public static var useCustomGlassImpl: Bool = true
+
     public override init(frame: CGRect) {
         if #available(iOS 26.0, *), !GlassBackgroundView.useCustomGlassImpl {
             self.backgroundNode = nil
-            
+            self.materialView = nil
+
             let glassEffect = UIGlassEffect(style: .regular)
             glassEffect.isInteractive = false
             let nativeView = UIVisualEffectView(effect: glassEffect)
             self.nativeViewClippingContext = ClippingShapeContext(view: nativeView)
             self.nativeView = nativeView
-            
+
             let nativeParamsView = EffectSettingsContainerView(frame: CGRect())
             self.nativeParamsView = nativeParamsView
-            
+
             nativeParamsView.addSubview(nativeView)
-            
+
             self.foregroundView = nil
             self.shadowView = nil
+        } else if GlassBackgroundView.useCustomGlassImpl {
+            self.backgroundNode = nil
+            self.nativeView = nil
+            self.nativeViewClippingContext = nil
+            self.nativeParamsView = nil
+            self.foregroundView = nil
+            self.shadowView = nil
+
+            self.materialView = nil
         } else {
             let backgroundNode = NavigationBackgroundNode(color: .black, enableBlur: true, customBlurRadius: 8.0)
             self.backgroundNode = backgroundNode
+            self.materialView = nil
             self.nativeView = nil
             self.nativeViewClippingContext = nil
             self.nativeParamsView = nil
             self.foregroundView = UIImageView()
-            
+
             self.shadowView = UIImageView()
         }
         
@@ -388,7 +835,18 @@ public class GlassBackgroundView: UIView {
     required public init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
-    
+
+    override public func didMoveToWindow() {
+        super.didMoveToWindow()
+
+        // Update content source when window becomes available
+        if let materialView = self.materialView, let window = self.window {
+            if materialView.contentSourceView !== window {
+                materialView.updateContentSource(window)
+            }
+        }
+    }
+
     override public func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         if let nativeView = self.nativeView {
             if let result = nativeView.hitTest(self.convert(point, to: nativeView), with: event) {
@@ -407,8 +865,73 @@ public class GlassBackgroundView: UIView {
     }
     
     public func update(size: CGSize, shape: Shape, isDark: Bool, tintColor: TintColor, isInteractive: Bool = false, transition: ComponentTransition) {
+        if GlassBackgroundView.useCustomGlassImpl && self.backgroundNode == nil && self.nativeView == nil {
+            if self.whiteBacklightView == nil {
+                let backlightView = UIView()
+                backlightView.backgroundColor = UIColor.white
+                backlightView.alpha = 0.7
+                self.whiteBacklightView = backlightView
+                self.insertSubview(backlightView, at: 0)
+            }
+
+            if self.materialView == nil {
+                var contentSource: UIView = self
+                if let window = self.window {
+                    contentSource = window
+                } else if let superview = self.superview {
+                    contentSource = superview.window ?? superview
+                }
+
+                let advancedView = AdvancedMaterialView(contentSource: contentSource)
+                advancedView.alpha = 0.2
+                self.materialView = advancedView
+                if let backlightView = self.whiteBacklightView {
+                    self.insertSubview(advancedView, aboveSubview: backlightView)
+                } else {
+                    self.insertSubview(advancedView, at: 0)
+                }
+            }
+
+            if let backlightView = self.whiteBacklightView {
+                switch shape {
+                case let .roundedRect(cornerRadius):
+                    backlightView.layer.cornerRadius = cornerRadius
+                    backlightView.layer.masksToBounds = true
+                }
+
+                if transition.animation.isImmediate {
+                    backlightView.frame = CGRect(origin: CGPoint(), size: size)
+                } else {
+                    transition.setFrame(view: backlightView, frame: CGRect(origin: CGPoint(), size: size))
+                }
+            }
+
+            if let materialView = self.materialView {
+                // Always try to update to window if available
+                if let window = self.window, materialView.contentSourceView !== window {
+                    materialView.updateContentSource(window)
+                } else if materialView.contentSourceView == nil, let superview = self.superview?.window {
+                    materialView.updateContentSource(superview)
+                }
+
+                // Update properties
+                switch shape {
+                case let .roundedRect(cornerRadius):
+                    materialView.shapeRadius = cornerRadius
+                }
+
+                materialView.isDarkAppearance = isDark
+
+                if transition.animation.isImmediate {
+                    materialView.frame = CGRect(origin: CGPoint(), size: size)
+                } else {
+                    transition.setFrame(view: materialView, frame: CGRect(origin: CGPoint(), size: size))
+                }
+            }
+        }
+
         if let nativeView = self.nativeView, let nativeViewClippingContext = self.nativeViewClippingContext, (nativeView.bounds.size != size || nativeViewClippingContext.shape != shape) {
-            
+
             nativeViewClippingContext.update(shape: shape, size: size, transition: transition)
             if transition.animation.isImmediate {
                 nativeView.frame = CGRect(origin: CGPoint(), size: size)
@@ -419,7 +942,7 @@ public class GlassBackgroundView: UIView {
         }
         if let backgroundNode = self.backgroundNode {
             backgroundNode.updateColor(color: .clear, forceKeepBlur: tintColor.color.alpha != 1.0, transition: transition.containedViewLayoutTransition)
-            
+
             switch shape {
             case let .roundedRect(cornerRadius):
                 backgroundNode.update(size: size, cornerRadius: cornerRadius, transition: transition.containedViewLayoutTransition)

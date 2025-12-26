@@ -742,7 +742,7 @@ public class ItemListPeerItemNode: ItemListRevealOptionsItemNode, ItemListItemNo
     private var credibilityIconView: ComponentHostView<Empty>?
     private var verifiedIconComponent: EmojiStatusComponent?
     private var verifiedIconView: ComponentHostView<Empty>?
-    private var switchNode: SwitchNode?
+    private var switchNode: LiquidGlassSwitchNode?
     private var checkNode: ASImageNode?
     private var leftCheckNode: CheckNode?
     
@@ -1039,7 +1039,7 @@ public class ItemListPeerItemNode: ItemListRevealOptionsItemNode, ItemListItemNo
                 switch switchValue.style {
                 case .standard:
                     if currentSwitchNode == nil {
-                        currentSwitchNode = SwitchNode()
+                        currentSwitchNode = LiquidGlassSwitchNode()
                     }
                     rightInset += switchSize.width
                     currentCheckNode = nil
@@ -1061,7 +1061,7 @@ public class ItemListPeerItemNode: ItemListRevealOptionsItemNode, ItemListItemNo
                 currentCheckNode = nil
             }
             
-            if let currentSwitchNode, let switchView = currentSwitchNode.view as? UISwitch {
+            if let currentSwitchNode, let switchView = currentSwitchNode.view as? LiquidGlassSwitchView {
                 if currentSwitchNode.bounds.size.width.isZero {
                     switchView.sizeToFit()
                 }

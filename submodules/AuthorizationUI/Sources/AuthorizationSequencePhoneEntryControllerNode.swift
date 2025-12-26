@@ -266,33 +266,33 @@ private final class PhoneAndCountryNode: ASDisplayNode {
 
 private final class ContactSyncNode: ASDisplayNode {
     private let titleNode: ImmediateTextNode
-    let switchNode: SwitchNode
-    
+    let switchNode: LiquidGlassSwitchNode
+
     init(theme: PresentationTheme, strings: PresentationStrings) {
         self.titleNode = ImmediateTextNode()
         self.titleNode.maximumNumberOfLines = 1
         self.titleNode.attributedText = NSAttributedString(string: strings.Privacy_ContactsSync, font: Font.regular(17.0), textColor: theme.list.itemPrimaryTextColor)
-        self.switchNode = SwitchNode()
+        self.switchNode = LiquidGlassSwitchNode()
         self.switchNode.frameColor = theme.list.itemSwitchColors.frameColor
         self.switchNode.contentColor = theme.list.itemSwitchColors.contentColor
         self.switchNode.handleColor = theme.list.itemSwitchColors.handleColor
         self.switchNode.isOn = true
-        
+
         super.init()
-        
+
         self.addSubnode(self.titleNode)
         self.addSubnode(self.switchNode)
     }
-    
+
     func updateLayout(width: CGFloat) -> CGSize {
         var switchSize = CGSize(width: 51.0, height: 31.0)
-        if let switchView = self.switchNode.view as? UISwitch {
+        if let switchView = self.switchNode.view as? LiquidGlassSwitchView {
             if self.switchNode.bounds.size.width.isZero {
                 switchView.sizeToFit()
             }
             switchSize = switchView.bounds.size
         }
-        
+
         let inset: CGFloat = 24.0
         let titleSize = self.titleNode.updateLayout(CGSize(width: width - switchSize.width - inset * 2.0 - 8.0, height: .greatestFiniteMagnitude))
         let height: CGFloat = 40.0

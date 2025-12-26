@@ -246,7 +246,7 @@ public class ItemListExpandableSwitchItemNode: ListViewItemNode, ItemListItemNod
         self.titleNode.isUserInteractionEnabled = false
         switch type {
             case .regular:
-                self.switchNode = SwitchNode()
+                self.switchNode = LiquidGlassSwitchNode()
             case .icon:
                 self.switchNode = IconSwitchNode()
         }

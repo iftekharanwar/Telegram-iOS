@@ -332,7 +332,7 @@ public final class ListActionItemComponent: Component {
         private var icon: ComponentView<Empty>?
         
         private var arrowView: UIImageView?
-        private var switchNode: SwitchNode?
+        private var switchNode: LiquidGlassSwitchNode?
         private var iconSwitchNode: IconSwitchNode?
         private var activityIndicatorView: UIActivityIndicatorView?
         private var customAccessoryView: ComponentView<Empty>?
@@ -736,7 +736,7 @@ public final class ListActionItemComponent: Component {
             if case let .toggle(toggle) = component.accessory {
                 switch toggle.style {
                 case .regular:
-                    let switchNode: SwitchNode
+                    let switchNode: LiquidGlassSwitchNode
                     var switchTransition = transition
                     var updateSwitchTheme = themeUpdated
                     if let current = self.switchNode {
@@ -745,7 +745,7 @@ public final class ListActionItemComponent: Component {
                     } else {
                         switchTransition = switchTransition.withAnimation(.none)
                         updateSwitchTheme = true
-                        switchNode = SwitchNode()
+                        switchNode = LiquidGlassSwitchNode()
                         switchNode.setOn(toggle.isOn, animated: false)
                         self.switchNode = switchNode
                         self.button.addSubview(switchNode.view)

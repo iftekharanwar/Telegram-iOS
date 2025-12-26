@@ -185,10 +185,10 @@ private class RecentSessionScreenNode: ViewControllerTracingNode, ASScrollViewDe
     private let acceptBackgroundNode: ASDisplayNode
     private let acceptHeaderNode: ImmediateTextNode
     private let secretChatsTitleNode: ImmediateTextNode
-    private let secretChatsSwitchNode: SwitchNode
+    private let secretChatsSwitchNode: LiquidGlassSwitchNode
     private let secretChatsActivateAreaNode: AccessibilityAreaNode
     private let incomingCallsTitleNode: ImmediateTextNode
-    private let incomingCallsSwitchNode: SwitchNode
+    private let incomingCallsSwitchNode: LiquidGlassSwitchNode
     private let incomingCallsActivateAreaNode: AccessibilityAreaNode
     private let acceptSeparatorNode: ASDisplayNode
     
@@ -261,9 +261,9 @@ private class RecentSessionScreenNode: ViewControllerTracingNode, ASScrollViewDe
         
         self.acceptHeaderNode = ImmediateTextNode()
         self.secretChatsTitleNode = ImmediateTextNode()
-        self.secretChatsSwitchNode = SwitchNode()
+        self.secretChatsSwitchNode = LiquidGlassSwitchNode()
         self.incomingCallsTitleNode = ImmediateTextNode()
-        self.incomingCallsSwitchNode = SwitchNode()
+        self.incomingCallsSwitchNode = LiquidGlassSwitchNode()
         
         self.secretChatsActivateAreaNode = AccessibilityAreaNode()
         self.incomingCallsActivateAreaNode = AccessibilityAreaNode()
@@ -854,12 +854,12 @@ private class RecentSessionScreenNode: ViewControllerTracingNode, ASScrollViewDe
             let secretChatsTitleTextFrame = CGRect(origin: CGPoint(x: secretFrame.minX + inset, y: secretFrame.minY + floorToScreenPixels((fieldItemHeight - secretChatsTitleTextSize.height) / 2.0)), size: secretChatsTitleTextSize)
             transition.updateFrame(node: self.secretChatsTitleNode, frame: secretChatsTitleTextFrame)
 
-            if let switchView = self.secretChatsSwitchNode.view as? UISwitch {
+            if let switchView = self.secretChatsSwitchNode.view as? LiquidGlassSwitchView {
                 if self.secretChatsSwitchNode.bounds.size.width.isZero {
                     switchView.sizeToFit()
                 }
                 let switchSize = switchView.bounds.size
-                
+
                 self.secretChatsSwitchNode.frame = CGRect(origin: CGPoint(x: fieldFrame.maxX - switchSize.width - inset, y: secretFrame.minY + floorToScreenPixels((fieldItemHeight - switchSize.height) / 2.0)), size: switchSize)
                 self.secretChatsActivateAreaNode.frame = CGRect(origin: CGPoint(x: secretFrame.minX, y: secretFrame.minY), size: CGSize(width: fieldFrame.width, height: fieldItemHeight))
             }
@@ -871,12 +871,12 @@ private class RecentSessionScreenNode: ViewControllerTracingNode, ASScrollViewDe
         
         transition.updateFrame(node: self.acceptSeparatorNode, frame: CGRect(x: secretFrame.minX + inset, y: secretFrame.minY + fieldItemHeight, width: fieldFrame.width - inset, height: UIScreenPixel))
 
-        if let switchView = self.incomingCallsSwitchNode.view as? UISwitch {
+        if let switchView = self.incomingCallsSwitchNode.view as? LiquidGlassSwitchView {
             if self.incomingCallsSwitchNode.bounds.size.width.isZero {
                 switchView.sizeToFit()
             }
             let switchSize = switchView.bounds.size
-            
+
             self.incomingCallsSwitchNode.frame = CGRect(origin: CGPoint(x: fieldFrame.maxX - switchSize.width - inset, y: secretFrame.maxY - fieldItemHeight + floorToScreenPixels((fieldItemHeight - switchSize.height) / 2.0)), size: switchSize)
             self.incomingCallsActivateAreaNode.frame = CGRect(origin: CGPoint(x: secretFrame.minX, y: secretFrame.maxY - fieldItemHeight), size: CGSize(width: fieldFrame.width, height: fieldItemHeight))
         }

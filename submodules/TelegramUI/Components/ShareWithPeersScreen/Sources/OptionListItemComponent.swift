@@ -102,6 +102,7 @@ final class OptionListItemComponent: Component {
                 component: AnyComponent(SwitchComponent(
                     tintColor: nil,
                     value: component.selected,
+                    useLiquidGlass: true,
                     valueUpdated: { selected in
                         component.selectionChanged(selected)
                     }

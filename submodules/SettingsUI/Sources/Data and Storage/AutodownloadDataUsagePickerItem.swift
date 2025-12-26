@@ -298,6 +298,7 @@ private final class AutodownloadDataUsagePickerItemNode: ListViewItemNode {
                                     }
                                 )),
                                 useNative: true,
+                                useLiquidGlass: true,
                                 trackBackgroundColor: item.theme.list.itemSwitchColors.frameColor,
                                 trackForegroundColor: item.theme.list.itemAccentColor
                             )

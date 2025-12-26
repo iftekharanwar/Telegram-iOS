@@ -86,7 +86,7 @@ public struct ExperimentalUISettings: Codable, Equatable {
             enableVoipTcp: false,
             experimentalCompatibility: false,
             enableDebugDataDisplay: false,
-            fakeGlass: false,
+            fakeGlass: true,
             compressedEmojiCache: false,
             localTranscription: false,
             enableReactionOverrides: false,

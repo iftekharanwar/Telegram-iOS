@@ -786,6 +786,7 @@ private final class ForumCreateTopicScreenComponent: CombinedComponent {
                 let hideSwitch = hideSwitch.update(
                     component: SwitchComponent(
                         value: !state.isHidden,
+                        useLiquidGlass: true,
                         valueUpdated: { [weak state] newValue in
                             state?.updateIsHidden(!newValue)
                         }

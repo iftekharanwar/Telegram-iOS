@@ -8,7 +8,7 @@ final class InstantPageSettingsSwitchNode: InstantPageSettingsItemNode {
     private let toggled: (Bool) -> Void
     
     private let labelNode: ASTextNode
-    private let switchNode: SwitchNode
+    private let switchNode: LiquidGlassSwitchNode
     
     var isOn: Bool {
         didSet {
@@ -39,7 +39,7 @@ final class InstantPageSettingsSwitchNode: InstantPageSettingsItemNode {
         
         self.labelNode = ASTextNode()
         
-        self.switchNode = SwitchNode()
+        self.switchNode = LiquidGlassSwitchNode()
         if isEnabled {
             self.switchNode.isOn = isOn
         } else {

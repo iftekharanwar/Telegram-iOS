@@ -5,7 +5,13 @@
       "Bash(.build/debug/makeproject:*)",
       "Bash(mkdir:*)",
       "Bash(find:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(git checkout:*)",
+      "Bash(ls:*)",
+      "Bash(xargs:*)",
+      "Bash(cat:*)",
+      "Bash(bazel build:*)",
+      "Bash(xcodebuild:*)"
     ],
     "deny": []
   }
